@@ -1,0 +1,359 @@
+drop table if exists p_counterparty_0010;
+create table p_counterparty_0010 as -- физ лица
+select distinct
+	c_.counterparty_rk, 
+	min(c_.effective_from_date) over (partition by c_.counterparty_rk) effective_from_date,
+	max(c_.effective_to_date) over (partition by c_.counterparty_rk) effective_to_date,
+	c_.src_cd 
+from counterparty c_
+join dict_counterparty_type_cd dctc_ 
+	on c_.counterparty_type_cd = dctc_.counterparty_type_cd 
+	and dctc_.counterparty_type_desc = 'физическое лицо'
+where c_.src_cd = 'MDMP';
+-----------
+drop table if exists dict_contact_type_cd;
+create table dict_contact_type_cd
+	(contact_type_cd_desc text,
+	 contact_type_cd int);
+insert into dict_contact_type_cd
+values   ('NotificPhone', 1),
+		 ('ATMPhone', 2),
+		 ('MobilePersonalPhone', 3),
+		 ('MobileWorkNumber', 4),
+		 ('HomePhone', 5);
+
+drop table if exists dict_src_cd;
+create table dict_src_cd 
+	(src_cd_desc text,
+	 src_cd int);
+insert into  dict_src_cd 
+values
+	('MDMP', 1),
+	('WAYN', 2),
+	('RTLL', 3),
+	('RTLS', 4),
+	('CFTB', 5);
+-----
+drop table if exists p_counterparty_0020; -- глобал клиенты и соотетствующие им локал из бриджа с учетом интервалов действия связи
+create table p_counterparty_0020 as
+select 
+	c_.counterparty_rk,
+	c_.effective_from_date c_from_dt,
+	c_.effective_to_date c_to_dt,
+	c_.src_cd c_src,
+	x_.counterparty_rk x_counterparty_rk,
+	x_.effective_from_date x_from_dt,
+	x_.effective_to_date x_to_dt,
+	x_.src_cd x_src,
+	case when x_.effective_from_date >= c_.effective_from_date and x_.effective_from_date <= c_.effective_to_date 
+			then x_.effective_from_date
+		when x_.effective_from_date < c_.effective_from_date and x_.effective_to_date >= c_.effective_from_date	
+			then c_.effective_from_date
+	end as x_from_true,
+	case when x_.effective_to_date >= c_.effective_from_date and x_.effective_to_date <= c_.effective_to_date 
+			then x_.effective_to_date
+		when x_.effective_to_date > c_.effective_to_date --and x_.effective_to_date >= c_.effective_from_date	
+			then c_.effective_to_date
+	end as x_to_true
+from p_counterparty_0010 c_ 
+join counterparty_x_uniq_counterparty x_ 
+	on c_.counterparty_rk = x_.uniq_counterparty_rk
+	and ((x_.effective_from_date >= c_.effective_from_date and x_.effective_from_date <= c_.effective_to_date )
+		or (x_.effective_from_date < c_.effective_from_date and x_.effective_to_date >= c_.effective_from_date)); 
+
+----------
+drop table if exists p_phone_0010;  --тел глобал клиентов, связанных с локальными клиентами
+create table p_phone_0010 as
+select 
+	c_.counterparty_rk,
+	c_.c_from_dt,
+	c_.c_to_dt,
+	c_.c_src,
+	c_.x_counterparty_rk ,
+	c_.x_from_true,
+	c_.x_to_true,
+	cc_.effective_from_date cc_from_dt,
+	cc_.effective_to_date cc_to_dt,
+	case when cc_.effective_from_date >= c_.x_from_true and cc_.effective_from_date <= c_.x_to_true 
+			then cc_.effective_from_date
+		when cc_.effective_from_date < c_.x_from_true and cc_.effective_to_date >= c_.x_from_true 
+			then c_.x_from_true
+	end as cc_from_true,
+	case when cc_.effective_to_date >= c_.x_from_true and cc_.effective_to_date <= c_.x_to_true 
+			then cc_.effective_to_date
+		when cc_.effective_to_date > c_.x_to_true and cc_.effective_from_date <= c_.x_to_true	
+			then c_.x_to_true
+	end as cc_to_true,
+	cc_.contact_desc,
+	cc_.src_cd cc_src,
+	cc_.contact_type_cd ,
+	cc_.contact_quality_code ,
+	cc_.trust_system_flg	
+from p_counterparty_0020 c_
+join counterparty_contact cc_ 
+	on cc_.counterparty_rk = c_.x_counterparty_rk  
+	and cc_.src_cd in ('MDMP', 'RTLL', 'RTLS', 'CFTB', 'WAYN')
+	and ((cc_.effective_from_date >= c_.x_from_true  and cc_.effective_from_date <= c_.x_to_true)
+		or (cc_.effective_from_date < c_.x_from_true and cc_.effective_to_date >= c_.x_from_true))
+order by c_.counterparty_rk;
+---
+
+insert into p_phone_0010
+	(counterparty_rk, c_from_dt, c_to_dt, c_src, cc_src, cc_from_dt, cc_to_dt, 
+	contact_desc, contact_type_cd, contact_quality_code, trust_system_flg,
+	cc_from_true, cc_to_true)	
+with counterparty_not_in_phone_0010 as
+(select 
+	counterparty_rk,
+	effective_from_date c_from_dt,
+	effective_to_date c_to_dt,
+	src_cd c_src
+from p_counterparty_0010
+where (counterparty_rk not in (select counterparty_rk from counterparty_x_uniq_counterparty)) and (counterparty_rk in (select counterparty_rk from counterparty_contact))
+)
+select 
+	c_.counterparty_rk,
+	c_.c_from_dt,
+	c_.c_to_dt,
+	c_.c_src,
+	cc_.src_cd cc_src,
+	cc_.effective_from_date cc_from_dt,
+	cc_.effective_to_date cc_to_dt,
+	cc_.contact_desc,
+	cc_.contact_type_cd,
+	cc_.contact_quality_code,
+	cc_.trust_system_flg,
+	case when cc_.effective_from_date >= c_.c_from_dt and cc_.effective_from_date <= c_.c_to_dt 
+			then cc_.effective_from_date
+		when cc_.effective_from_date < c_.c_from_dt and cc_.effective_to_date >= c_.c_from_dt 
+			then c_.c_from_dt
+	end as cc_from_true,
+	case when cc_.effective_to_date >= c_.c_from_dt and cc_.effective_to_date <= c_.c_to_dt 
+			then cc_.effective_to_date
+		when cc_.effective_to_date > c_.c_to_dt and cc_.effective_from_date <= c_.c_to_dt	
+			then c_.c_to_dt
+	end as cc_to_true
+from counterparty_not_in_phone_0010 as c_
+join counterparty_contact as cc_
+	on cc_.counterparty_rk = c_.counterparty_rk
+	and ((cc_.effective_from_date >= c_.c_from_dt  and cc_.effective_from_date <= c_.c_to_dt)
+		or (cc_.effective_from_date < c_.c_from_dt and cc_.effective_to_date >= c_.c_from_dt));
+	
+---------------- 
+
+drop table if exists p_phone_0020 ; -- Добавляем флаги нотификации и АТМ и кодируем тип контакта и системы источника для ранжирования качества телефонов
+create table p_phone_0020 as
+select 
+	p_.counterparty_rk,
+	p_.contact_type_cd phone_type_cd,
+	dsc.src_cd cc_src,
+	dctc.contact_type_cd ,
+	p_.contact_quality_code,
+	p_.cc_from_true business_start_dt,
+	p_.cc_to_true business_end_dt,
+	p_.contact_desc phone_num,
+	case when p_.contact_type_cd = 'NotificPhone' then true
+		    else false 
+		end notification_flg,
+	case when p_.contact_type_cd = 'ATMPhone' then true
+		    else false 
+		end atm_flg,
+	p_.trust_system_flg,
+	false 	duplication_flg ,
+	false 	main_dup_flg,
+	false 	main_phone_flg
+from dict_contact_type_cd dctc 
+	join p_phone_0010 p_ on p_.contact_type_cd = dctc.contact_type_cd_desc 
+	join dict_src_cd dsc on dsc.src_cd_desc = p_.cc_src
+order by p_.counterparty_rk;
+------
+
+drop table if exists p_phone_0030; -- ставим флаг duplication_flg для повторяющихся телефонов
+create table p_phone_0030 as
+select 
+		counterparty_rk,
+		business_start_dt,
+		business_end_dt,
+		cc_src,
+		phone_num ,
+		contact_type_cd ,
+		case when contact_quality_code like 'GOOD' then 1
+			else 0
+		end quality_cd,
+		notification_flg,
+		atm_flg,
+		trust_system_flg,
+		case when phone_num in (
+			select phone_num
+			from p_phone_0020 
+			group by phone_num
+			having count(phone_num) > 1) 
+		then true 
+		else false
+		end duplication_flg
+	from p_phone_0020 
+order by counterparty_rk ;
+
+
+drop table if exists only_dupl;
+create table only_dupl as -- Анализируем только повторяющиеся тел, проводим дедупликацию на основе временных интервалов действия телефона
+with dupl_0 as 
+(select 	
+	phone_num,
+    counterparty_rk,
+    business_start_dt as start_date,
+	coalesce (min(business_start_dt) over (partition by phone_num 
+    	order by business_start_dt rows between 1 following and 1 following) ,
+    	cast('2999-12-31' as date)) as end_date,
+    business_end_dt
+from p_phone_0030 
+where duplication_flg = True
+order by start_date
+),
+dupl_1 as 
+(select 	
+	phone_num,
+    counterparty_rk,
+    start_date,
+    case when end_date > business_end_dt then business_end_dt
+    	else end_date 
+    end as end_date,
+    business_end_dt
+from dupl_0 
+order by start_date
+)
+select 
+	r1.phone_num,
+	r1.counterparty_rk,
+    r1.start_date,
+    r1.end_date,
+    r1.business_end_dt,
+    r2.counterparty_rk glob_counetrparty_rk,
+    r2.phone_num glob_phone_num,
+    case when avg(r2.counterparty_rk)  over (partition by r1.counterparty_rk, r1.phone_num )  <> r1.counterparty_rk
+         then true 
+         else false 
+    end as dupl
+from dupl_1 r1 
+left join p_phone_0030 r2
+	on r1.phone_num = r2.phone_num 
+	and r2.business_start_dt <= r1.start_date 
+order by r1.phone_num;
+
+
+drop table if exists p_phone_0040;
+create table p_phone_0040 as -- Записываем из общей табл телефонов p_phone_0030 те, которые есть в табл дублирующихся и проставляем для них корректные временные интервалы действия
+select 
+	p.counterparty_rk,
+	p.cc_src,
+	p.phone_num,
+	p.contact_type_cd ,
+	p.quality_cd,
+	p.notification_flg,
+	p.atm_flg,
+	p.trust_system_flg,
+	d.dupl,
+	d.start_date business_start_dt,
+	d.end_date business_end_dt
+from p_phone_0030 p
+join only_dupl d 
+	on d.glob_phone_num = p.phone_num and d.glob_counetrparty_rk = p.counterparty_rk ;
+
+insert into p_phone_0040 -- Добавляем не повторяющиеся тел из общей табл  p_phone_0030
+(counterparty_rk,
+cc_src,
+phone_num,
+contact_type_cd ,
+quality_cd,
+notification_flg,
+atm_flg,
+trust_system_flg,
+dupl,
+business_start_dt,
+business_end_dt)
+select 
+	counterparty_rk,
+	cc_src,
+	phone_num,
+	contact_type_cd ,
+	quality_cd,
+	notification_flg,
+	atm_flg,
+	trust_system_flg,
+	false,
+	business_start_dt,
+	business_end_dt
+from p_phone_0030
+where phone_num not in (select distinct glob_phone_num from only_dupl );
+-----------------
+-- Ранжируем тел по качеству:
+drop table if exists p_phone_0050;
+create table p_phone_0050 as
+WITH ordered AS
+(select 
+	row_number() over (partition by p.counterparty_rk
+					 order by p.trust_system_flg desc,
+					 		  p.quality_cd desc,
+					 		  p.cc_src,
+					 		  p.contact_type_cd ,
+					 		  p.business_start_dt desc) as rownum,
+	p.*
+from 
+	(select *
+	from p_phone_0040  
+	where dupl is False
+	order by counterparty_rk) as p
+)
+select *, true as main_phone_flg
+from ordered
+where rownum = 1;
+
+insert into p_phone_0050 
+WITH ordered AS
+(select 
+	row_number() over (partition by p.counterparty_rk
+					 order by p.trust_system_flg desc,
+					 		  p.quality_cd desc,
+					 		  p.cc_src,
+					 		  p.contact_type_cd ,
+					 		  p.business_start_dt desc) as rownum,
+	p.*
+from 
+	(select p40.*
+	from p_phone_0040 p40
+	where (counterparty_rk, phone_num)  not in (select counterparty_rk, phone_num  from p_phone_0050)
+	) as p
+)
+select *, true as main_phone_flg
+from ordered
+where rownum = 1;
+---
+drop table if exists dfct_phone;
+create table dfct_phone as    -- Добавляем флаг лучшего тел для клиента на основе качества телефонов
+select 
+	p40.counterparty_rk mdm_customer,
+	dctc.contact_type_cd_desc phone_type_cd,
+	p40.business_start_dt ,
+	p40.business_end_dt ,
+	p40.phone_num ,
+	p40.notification_flg ,
+	p40.atm_flg ,
+	p40.trust_system_flg ,
+	p40.dupl duplication_flg ,
+	p50.main_phone_flg
+from dict_contact_type_cd dctc
+join p_phone_0040 p40
+	on p40.contact_type_cd = dctc.contact_type_cd 
+left join p_phone_0050 p50
+	on p40.counterparty_rk = p50.counterparty_rk 
+	and p40.phone_num = p50.phone_num 
+	and p40.business_start_dt = p50.business_start_dt;
+
+update dfct_phone  
+set main_phone_flg = false
+where main_phone_flg is null;
+---
+
+
+
+
